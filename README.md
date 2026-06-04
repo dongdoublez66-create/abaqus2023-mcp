@@ -1,262 +1,193 @@
-# Abaqus MCP Plugin v4.0
+# Abaqus MCP Bridge
 
-A plugin that enables communication between **Abaqus/CAE** and external AI assistants (or any MCP client) via file-based IPC.
+An MCP server and Abaqus/CAE plugin that let MCP clients execute Abaqus Python
+inside a running Abaqus/CAE session.
 
-## What's New in v4.0
-
-- **Job management** — list and submit Abaqus jobs remotely
-- **ODB inspection** — open ODB files read-only and query steps, frames, instances
-- **Viewport capture** — screenshot any Abaqus viewport as base64 image
-- **Richer model info** — now includes loads, BCs, interactions, and assembly instances
-- **MCP resource** — `abaqus://status` resource for real-time plugin status
-- **Stale command cleanup** — automatically removes commands older than 2 minutes
-- **Logging** — all operations logged to `~/.abaqus-mcp/mcp.log`
-- **Version tracking** — status.json and ping responses include plugin version
-- **GUI Status button** — check plugin state from the Plug-ins menu
+This project was tested with Abaqus/CAE 2023 on Windows. Abaqus 2023 uses an
+older embedded Python runtime, so the bridge uses file-based IPC instead of
+sockets.
 
 ## Architecture
 
 ```text
-┌─────────────┐  MCP protocol   ┌───────────────┐  file IPC   ┌──────────────┐
-│  MCP Client  │ ──────────────> │  mcp_server.py │ ─────────> │ Abaqus/CAE   │
-│  (Cursor AI) │ <────────────── │  (FastMCP)     │ <───────── │ (plugin.py)  │
-└─────────────┘                  └───────────────┘             └──────────────┘
-                                        │
-                                   commands/*.json ──>  (plugin reads & deletes)
-                                   results/*.json  <──  (plugin writes)
-                                   status.json     <──  (heartbeat every 2s)
+MCP client
+  -> mcp_server.py
+  -> ~/.abaqus-mcp/commands/cmd_<id>.json
+  -> abaqus_mcp_plugin.py running inside Abaqus/CAE
+  -> ~/.abaqus-mcp/results/<id>.json
+  -> mcp_server.py
+  -> MCP client
 ```
+
+The external MCP server never imports `abaqus`. Abaqus APIs such as `mdb` and
+`session` are only accessed from `abaqus_mcp_plugin.py`, which runs inside the
+Abaqus/CAE kernel.
 
 ## Features
 
-- Execute Python scripts in Abaqus remotely
-- Query model information (parts, materials, steps, loads, BCs, interactions)
-- List and submit analysis jobs
-- Inspect ODB result files
-- Capture viewport screenshots
-- Simple file-based communication (no sockets required)
-- Non-blocking background mode (GUI stays responsive)
-- GUI menu entries for start / stop / status control
-- Works with any MCP-compatible client (Cursor, Claude Desktop, etc.)
+- Execute Abaqus Python scripts remotely
+- Query models, parts, materials, steps, loads, boundary conditions, jobs, and viewports
+- Submit existing Abaqus jobs and wait for completion
+- Read ODB metadata
+- Capture viewport images as base64 data URLs
+- Stop/start the Abaqus-side polling loop with a menu or `stop.flag`
+
+## Compatibility Notes
+
+- Abaqus 2023: use `mcp_coop_loop()` or `mcp_loop()` for reliable command processing.
+  Background threads may start but fail to consume commands in some sessions.
+- Abaqus 2024/2025: background mode may be more reliable because the embedded
+  Python runtime is newer, but still treat it as experimental until tested.
+- This bridge controls a running Abaqus/CAE session. It is not a standalone
+  replacement for Abaqus or the Abaqus kernel.
 
 ## Installation
 
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/Cai-aa/abaqus-mcp.git ~/.abaqus-mcp
-```
-
-### 2. Install Python dependencies (for the MCP server)
-
-```bash
-pip install mcp
-```
-
-### 3. (Optional) Auto-load plugin on Abaqus startup
+Clone or copy this repository to the user's MCP home:
 
 ```powershell
-# Windows
-copy "$env:USERPROFILE\.abaqus-mcp\abaqus_v6.env.example" "$env:USERPROFILE\abaqus_v6.env"
+git clone https://github.com/YOUR_NAME/abaqus-mcp.git "$env:USERPROFILE\.abaqus-mcp"
 ```
 
-```bash
-# Linux/Mac
-cp ~/.abaqus-mcp/abaqus_v6.env.example ~/abaqus_v6.env
-```
-
-### 4. (Optional) Install GUI plugin menu
+Install the MCP dependency for the external server:
 
 ```powershell
-# Windows
-Copy-Item -Recurse "$env:USERPROFILE\.abaqus-mcp\abaqus_plugins\mcp_control" "$env:USERPROFILE\abaqus_plugins\mcp_control"
+python -m pip install mcp
 ```
 
-```bash
-# Linux/Mac
-cp -r ~/.abaqus-mcp/abaqus_plugins/mcp_control ~/abaqus_plugins/mcp_control
+Optional but recommended: install the Abaqus GUI menu.
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\abaqus_plugins" | Out-Null
+Copy-Item -Recurse -Force `
+  "$env:USERPROFILE\.abaqus-mcp\abaqus_plugins\mcp_control" `
+  "$env:USERPROFILE\abaqus_plugins\mcp_control"
 ```
 
-### 5. Configure your MCP client
+## MCP Client Configuration
 
-Add to your Cursor / Claude Desktop MCP settings (`.mcp.json`):
+Example `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "abaqus-mcp-server": {
       "command": "python",
-      "args": ["C:/Users/YourUsername/.abaqus-mcp/mcp_server.py"]
+      "args": ["C:/Users/YourUsername/.abaqus-mcp/mcp_server.py"],
+      "env": {
+        "ABAQUS_MCP_HOME": "C:/Users/YourUsername/.abaqus-mcp"
+      }
     }
   }
 }
 ```
 
-## Usage
+Use an absolute Python path if your MCP dependency is installed in a virtual
+environment.
 
-### Start MCP (in Abaqus)
+## Loading the Abaqus Plugin
 
-**Experimental** — non-blocking background thread (may be unstable on some Abaqus builds):
+### Option A: Abaqus startup argument
 
-```python
-mcp_start()  # GUI remains responsive if background worker is supported
-```
-
-Menu: `Plug-ins` → `MCP` → `Start MCP (Background)`
-
-**Alternative** — cooperative loop (mostly responsive):
-
-```python
-mcp_coop_loop()
-```
-
-Menu: `Plug-ins` → `MCP` → `Start MCP (Cooperative)`
-
-**Alternative** — blocking mode:
-
-```python
-mcp_loop()  # blocks console
-```
-
-Menu: `Plug-ins` → `MCP` → `Start MCP (Blocking)`
-
-
-| Mode                            | GUI Responsive     | Stop Method                 |
-| ------------------------------- | ------------------ | --------------------------- |
-| Background (`mcp_start()`)      | Yes (if supported) | `mcp_stop()` or menu        |
-| Cooperative (`mcp_coop_loop()`) | Mostly yes         | `mcp_stop()` or `stop.flag` |
-| Blocking (`mcp_loop()`)         | No                 | `stop.flag` / interrupt     |
-
-
-For maximum reliability, use `mcp_loop()` in production sessions.
-
-### Check Status
-
-```python
-mcp_status()  # prints status to console
-```
-
-Menu: `Plug-ins` → `MCP` → `MCP Status`
-
-### Stop MCP
-
-Option 1 — GUI menu: `Plug-ins` → `MCP` → `Stop MCP`
-
-Option 2 — Abaqus console:
-
-```python
-mcp_stop()
-```
-
-Option 3 — PowerShell:
+Start Abaqus/CAE with:
 
 ```powershell
-echo $null > "$env:USERPROFILE\.abaqus-mcp\stop.flag"
+abaqus cae startup="$env:USERPROFILE\.abaqus-mcp\start_mcp_in_cae.py"
 ```
 
-Option 4 — Run `stop_mcp.py` from any Python environment.
+On systems with release-specific commands, replace `abaqus` with `abq2023`,
+`abq2025`, or the matching launcher command.
 
-## MCP Tools
+### Option B: Abaqus environment file
 
-These tools are exposed to MCP clients via `mcp_server.py`:
+Copy the example environment file:
 
-
-| Tool                      | Description                                                   |
-| ------------------------- | ------------------------------------------------------------- |
-| `check_abaqus_connection` | Verify Abaqus is running and plugin is responding             |
-| `execute_script`          | Execute a Python script inside Abaqus/CAE                     |
-| `get_model_info`          | Get model details (parts, materials, steps, loads, BCs, etc.) |
-| `list_jobs`               | List all analysis jobs in the session                         |
-| `submit_job`              | Submit a job by name and wait for completion                  |
-| `get_odb_info`            | Open an ODB file read-only and return metadata                |
-| `get_viewport_image`      | Capture a viewport screenshot as base64                       |
-| `ping`                    | Test connection (returns version info)                        |
-
-
-## MCP Resources
-
-
-| URI               | Description                                                |
-| ----------------- | ---------------------------------------------------------- |
-| `abaqus://status` | Real-time plugin status (running/stopped, version, uptime) |
-
-
-## File-Based IPC Protocol
-
-Write a JSON command file into `~/.abaqus-mcp/commands/`:
-
-```python
-import json, os, time
-
-command = {
-    'id': 'my_command',
-    'type': 'execute_script',
-    'script': 'print("Hello from Abaqus!")',
-    'timestamp': time.time(),
-}
-
-cmd_path = os.path.expanduser('~/.abaqus-mcp/commands/cmd_my_command.json')
-with open(cmd_path, 'w') as f:
-    json.dump(command, f)
+```powershell
+Copy-Item "$env:USERPROFILE\.abaqus-mcp\abaqus_v6.env.example" "$env:USERPROFILE\abaqus_v6.env"
 ```
 
-Result will appear at `~/.abaqus-mcp/results/my_command.json`.
+Then start Abaqus/CAE normally.
 
-### Command Types
+## Starting the Command Loop
 
-
-| Type                 | Parameters                | Description                     |
-| -------------------- | ------------------------- | ------------------------------- |
-| `execute_script`     | `script` (str)            | Execute Python script in Abaqus |
-| `get_model_info`     | —                         | Get current model information   |
-| `list_jobs`          | —                         | List all defined jobs           |
-| `submit_job`         | `job_name` (str)          | Submit and wait for a job       |
-| `get_odb_info`       | `odb_path` (str)          | Read ODB metadata               |
-| `get_viewport_image` | `viewport_name`, `format` | Capture viewport screenshot     |
-| `ping`               | —                         | Test connection                 |
-| `stop`               | —                         | Request loop stop               |
-
-
-## Directory Structure
+After the plugin is loaded, start the polling loop from the Abaqus menu:
 
 ```text
-~/.abaqus-mcp/
-├── abaqus_mcp_plugin.py      # Abaqus-side plugin (runs inside CAE)
-├── mcp_server.py              # MCP server (runs externally)
-├── stop_mcp.py                # Helper to send stop signal
-├── abaqus_v6.env.example      # Auto-load config template
-├── .mcp.json                  # MCP client config example
-├── abaqus_plugins/
-│   └── mcp_control/
-│       ├── __init__.py
-│       └── mcp_control_plugin.py
-├── commands/                  # Incoming command files
-├── results/                   # Outgoing result files
-├── scripts/                   # Temporary script files
-├── screenshots/               # Temporary viewport captures
-├── status.json                # Heartbeat status (updated every 2s)
-├── mcp.log                    # Operation log
-└── stop.flag                  # Stop signal file
+Plug-ins -> MCP -> Start MCP (Cooperative)
 ```
+
+For Abaqus 2023, Cooperative or Blocking mode is recommended. The GUI can appear
+busy while the loop is running. This is expected: Abaqus is processing MCP
+commands in the CAE process.
+
+You can also run commands in the Abaqus Python console:
+
+```python
+mcp_coop_loop()   # reliable for Abaqus 2023, may keep the GUI busy
+mcp_loop()        # blocking, most reliable
+mcp_start()       # background thread, experimental
+mcp_stop()        # stop from inside Abaqus
+mcp_status()      # print plugin status
+```
+
+Stop the loop externally:
+
+```powershell
+python "$env:USERPROFILE\.abaqus-mcp\stop_mcp.py"
+```
+
+or create the stop flag manually:
+
+```powershell
+Set-Content "$env:USERPROFILE\.abaqus-mcp\stop.flag" "stop"
+```
+
+## Exposed MCP Tools
+
+- `check_abaqus_connection`
+- `ping`
+- `execute_script`
+- `get_model_info`
+- `list_jobs`
+- `submit_job`
+- `get_odb_info`
+- `get_viewport_image`
+
+## Runtime Files
+
+The bridge creates runtime files under `ABAQUS_MCP_HOME`:
+
+```text
+commands/
+results/
+scripts/
+screenshots/
+status.json
+status.json.tmp
+stop.flag
+mcp.log
+thread_error.log
+startup_debug.log
+```
+
+These files are ignored by Git.
 
 ## Troubleshooting
 
-- **Plugin says "running" but no commands are consumed:**
-  1. Run `mcp_stop()` then `mcp_start()` again
-  2. Check `~/.abaqus-mcp/status.json` — timestamp should update every ~2s
-  3. Check `~/.abaqus-mcp/mcp.log` for errors
-- **Abaqus uses a different home directory:**
-  ```python
-  import os; os.environ['ABAQUS_MCP_HOME'] = r'C:\Users\YourName\.abaqus-mcp'
-  ```
-  Set this before loading the plugin.
-- **Commands timing out:**
-  - Stale commands (>2 min) are auto-cleaned
-  - Ensure the plugin is in `running` state via `mcp_status()`
-- **GUI plugin not showing:**
-  - Verify `~/abaqus_plugins/mcp_control/` exists and contains `mcp_control_plugin.py`
-  - Restart Abaqus/CAE
+If the client says the plugin is loaded but not responding:
+
+1. In Abaqus/CAE, start `Plug-ins -> MCP -> Start MCP (Cooperative)`.
+2. Check that `status.json` updates every few seconds.
+3. Run `python stop_mcp.py`, then start the loop again.
+4. For Abaqus 2023, avoid relying on background mode until you verify `ping`.
+
+If commands time out, clear stale command/result files:
+
+```powershell
+Remove-Item "$env:USERPROFILE\.abaqus-mcp\commands\*.json" -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.abaqus-mcp\results\*.json" -ErrorAction SilentlyContinue
+```
 
 ## License
 
-MIT License
+MIT

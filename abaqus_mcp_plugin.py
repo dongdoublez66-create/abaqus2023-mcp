@@ -13,14 +13,26 @@ Usage:
 """
 
 import base64
-import io
 import json
 import os
+import sys
 import threading
 import time
 import traceback
 import uuid
 from datetime import datetime
+
+try:
+    from StringIO import StringIO
+except ImportError:
+    from io import StringIO
+
+try:
+    unicode
+    PY2 = True
+except NameError:
+    unicode = str
+    PY2 = False
 
 __version__ = '4.0.0'
 
@@ -69,7 +81,7 @@ def _log(level, message):
     try:
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         line = '[%s] %s: %s\n' % (ts, level, message)
-        with io.open(LOG_FILE, 'a', encoding='utf-8') as f:
+        with open(LOG_FILE, 'a') as f:
             f.write(line)
     except Exception:
         pass
@@ -78,37 +90,49 @@ def _log(level, message):
 def write_status(status, message=""):
     """Write status atomically so external readers never see partial JSON."""
     payload = {
-        "status": status,
-        "message": message,
-        "version": __version__,
-        "timestamp": time.time(),
+        "status": str(status),
+        "message": str(message),
+        "version": str(__version__),
+        "timestamp": float(time.time()),
         "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "pid": os.getpid(),
-        "mcp_home": MCP_HOME,
+        "pid": int(os.getpid()),
+        "mcp_home": str(MCP_HOME),
     }
     tmp_file = STATUS_FILE + '.tmp'
     try:
-        with io.open(tmp_file, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, indent=2)
+        status_text = json.dumps(payload, indent=2, ensure_ascii=True)
+        _write_text(tmp_file, status_text)
         for _ in range(5):
             try:
-                os.replace(tmp_file, STATUS_FILE)
+                if hasattr(os, 'replace'):
+                    os.replace(tmp_file, STATUS_FILE)
+                else:
+                    if os.path.exists(STATUS_FILE):
+                        os.remove(STATUS_FILE)
+                    os.rename(tmp_file, STATUS_FILE)
                 return
             except Exception:
                 time.sleep(0.02)
-        with io.open(STATUS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, indent=2)
+        with open(STATUS_FILE, 'w') as f:
+            json.dump(payload, f, indent=2, ensure_ascii=True)
         try:
             os.remove(tmp_file)
         except Exception:
             pass
     except Exception:
-        pass
+        _log('ERROR', 'write_status failed: ' + traceback.format_exc())
 
 
 def _write_json(path, data):
-    with io.open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2, ensure_ascii=True)
+
+
+def _write_text(path, text):
+    if PY2 and isinstance(text, unicode):
+        text = text.encode('utf-8')
+    with open(path, 'w') as f:
+        f.write(text)
 
 
 def _background_self_test(timeout=1.5):
@@ -133,7 +157,7 @@ def _background_self_test(timeout=1.5):
     while time.time() < deadline:
         if os.path.exists(result_path):
             try:
-                with io.open(result_path, 'r', encoding='utf-8') as f:
+                with open(result_path, 'r') as f:
                     data = json.load(f)
                 return bool(data.get('success'))
             except Exception:
@@ -192,8 +216,7 @@ def execute_script(script_content, script_id):
     }
     script_path = os.path.join(SCRIPTS_DIR, 'script_' + script_id + '.py')
     try:
-        with io.open(script_path, 'w', encoding='utf-8') as f:
-            f.write(script_content)
+        _write_text(script_path, script_content)
     except Exception as e:
         result['error'] = str(e)
         return result
@@ -206,17 +229,19 @@ def execute_script(script_content, script_id):
     except Exception:
         pass
 
-    output_lines = []
-    exec_globals['print'] = lambda *a, **k: output_lines.append(' '.join(str(x) for x in a))
-
+    old_stdout = sys.stdout
+    output_buffer = StringIO()
     try:
-        with io.open(script_path, 'r', encoding='utf-8') as f:
+        sys.stdout = output_buffer
+        with open(script_path, 'r') as f:
             exec(compile(f.read(), script_path, 'exec'), exec_globals)
         result['success'] = True
-        result['output'] = '\n'.join(output_lines)
+        result['output'] = output_buffer.getvalue()
     except Exception as e:
         result['error'] = str(e)
         result['traceback'] = traceback.format_exc()
+    finally:
+        sys.stdout = old_stdout
     try:
         os.remove(script_path)
     except Exception:
@@ -322,14 +347,24 @@ def get_viewport_image(viewport_name=None, width=800, height=600, fmt='PNG'):
     """Capture a viewport image and return it as base64."""
     try:
         from abaqus import session
+        from abaqusConstants import PNG, SVG, TIFF
         vp_name = viewport_name or session.currentViewportName
         if vp_name not in session.viewports:
             return {'success': False, 'error': 'Viewport not found: ' + str(vp_name)}
 
-        img_file = os.path.join(SCREENSHOTS_DIR, 'viewport_' + str(int(time.time())) + '.' + fmt.lower())
+        formats = {
+            'PNG': PNG,
+            'SVG': SVG,
+            'TIFF': TIFF,
+        }
+        fmt_key = str(fmt or 'PNG').upper()
+        if fmt_key not in formats:
+            return {'success': False, 'error': 'Unsupported image format: ' + str(fmt)}
+
+        img_file = os.path.join(SCREENSHOTS_DIR, 'viewport_' + str(int(time.time())) + '.' + fmt_key.lower())
         session.printToFile(
             fileName=img_file,
-            format=getattr(session, fmt.upper(), session.PNG),
+            format=formats[fmt_key],
             canvasObjects=(session.viewports[vp_name],)
         )
         if os.path.exists(img_file):
@@ -339,7 +374,7 @@ def get_viewport_image(viewport_name=None, width=800, height=600, fmt='PNG'):
                 os.remove(img_file)
             except Exception:
                 pass
-            return {'success': True, 'image_base64': data, 'format': fmt.lower()}
+            return {'success': True, 'image_base64': data, 'format': fmt_key.lower()}
         return {'success': False, 'error': 'Image file not created'}
     except Exception as e:
         return {'success': False, 'error': str(e)}
@@ -390,8 +425,7 @@ def process_command(command):
         elif cmd_type == 'stop':
             result['success'] = True
             result['data'] = 'stopping'
-            with io.open(STOP_FILE, 'w', encoding='utf-8') as f:
-                f.write('stop')
+            _write_text(STOP_FILE, 'stop')
         else:
             result['error'] = 'Unknown command: ' + cmd_type
     except Exception as e:
@@ -410,7 +444,7 @@ def _load_command_file(cmd_path, retries=3, delay=0.03):
     """Retry reads briefly to tolerate partially-written command files."""
     for _ in range(retries):
         try:
-            with io.open(cmd_path, 'r', encoding='utf-8-sig') as f:
+            with open(cmd_path, 'r') as f:
                 return json.load(f)
         except Exception:
             time.sleep(delay)
@@ -537,9 +571,7 @@ def _mcp_thread_loop(generation, poll_interval):
     except Exception as e:
         err_path = os.path.join(MCP_HOME, 'thread_error.log')
         try:
-            with io.open(err_path, 'w', encoding='utf-8') as f:
-                f.write(str(e) + '\n\n')
-                f.write(traceback.format_exc())
+            _write_text(err_path, str(e) + '\n\n' + traceback.format_exc())
         except Exception:
             pass
         print('MCP: Background worker error: ' + str(e))
@@ -655,8 +687,7 @@ def mcp_stop():
     _mcp_generation += 1
 
     try:
-        with io.open(STOP_FILE, 'w', encoding='utf-8') as f:
-            f.write('stop')
+        _write_text(STOP_FILE, 'stop')
     except Exception:
         pass
 

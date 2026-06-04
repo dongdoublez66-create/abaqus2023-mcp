@@ -4,6 +4,7 @@ status.json.tmp
 stop.flag
 mcp.log
 thread_error.log
+startup_debug.log
 
 # Command and result files
 commands/*.json
@@ -19,6 +20,7 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # Backup files
 *.bak

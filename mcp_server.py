@@ -107,10 +107,10 @@ def check_abaqus_connection() -> str:
         ping_data = result.get('data', {})
         pong_ver = ping_data.get('version', ver) if isinstance(ping_data, dict) else ver
         return (f'Connected to Abaqus MCP v{pong_ver}.\n'
-                f'Status: {s} — {msg}\nLast update: {dt}')
+                f'Status: {s} - {msg}\nLast update: {dt}')
     else:
         return (f'Abaqus plugin loaded but not responding to commands.\n'
-                f'Status: {s} — {msg}\nPing result: {result}\n'
+                f'Status: {s} - {msg}\nPing result: {result}\n'
                 f'Try running mcp_start() again in Abaqus.')
 
 
